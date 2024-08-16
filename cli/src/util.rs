@@ -9,13 +9,13 @@ pub async fn ask_user(message: impl std::fmt::Display, default_answer: bool) -> 
         if default_answer { "n" } else { "N" }
     );
 
-    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
     let stdin = io::stdin();
 
     loop {
-        stdout.write(message.as_bytes()).await.unwrap();
+        stderr.write(message.as_bytes()).await.unwrap();
 
-        stdout.flush().await.unwrap();
+        stderr.flush().await.unwrap();
 
         let mut answer = String::new();
         stdin.read_line(&mut answer).await.unwrap();
@@ -25,11 +25,11 @@ pub async fn ask_user(message: impl std::fmt::Display, default_answer: bool) -> 
             "n" | "no" => break false,
             "" => break default_answer,
             _ => {
-                stdout
+                stderr
                     .write("Please type y or n!\n".as_bytes())
                     .await
                     .unwrap();
-                stdout.flush().await.unwrap();
+                stderr.flush().await.unwrap();
                 continue;
             },
         };

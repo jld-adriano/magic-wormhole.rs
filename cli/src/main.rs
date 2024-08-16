@@ -91,6 +91,9 @@ struct CommonReceiverArgs {
     /// Store transferred file or folder in the specified directory. Defaults to $PWD.
     #[arg(long = "out-dir", value_name = "PATH", default_value = ".", value_hint = clap::ValueHint::DirPath)]
     file_path: PathBuf,
+    /// Output received file content to stdout instead of saving to a file
+    #[arg(long, conflicts_with = "file_path")]
+    stdout: bool,
 }
 
 // receive, connect
@@ -261,7 +264,7 @@ async fn main() -> eyre::Result<()> {
 
     let app = WormholeCli::parse();
 
-    let mut term = Term::stdout();
+    let mut term = Term::stderr();  // Use stderr instead of stdout
 
     if app.log {
         env_logger::builder()
@@ -370,7 +373,7 @@ async fn main() -> eyre::Result<()> {
             noconfirm,
             common,
             common_follower: CommonFollowerArgs { code },
-            common_receiver: CommonReceiverArgs { file_path },
+            common_receiver: CommonReceiverArgs { file_path, stdout },
             ..
         } => {
             let transit_abilities = parse_transit_args(&common);
@@ -396,6 +399,7 @@ async fn main() -> eyre::Result<()> {
                 relay_hints,
                 &file_path,
                 noconfirm,
+                stdout,
                 transit_abilities,
                 ctrl_c,
             ))
@@ -711,7 +715,7 @@ async fn make_send_offer(
         (_, None) => {
             let mut names = std::collections::BTreeMap::new();
             for path in &files {
-                eyre::ensure!(path.file_name().is_some(), "'{}' has no name. You need to send it separately and use the --rename flag, or rename it on the file system", path.display());
+                eyre::ensure!(path.file_name().is_some(), "'{}' has no name. You need to send it separately and use the --rename flag, or rename it on disk", path.display());
                 if let Some(old) = names.insert(path.file_name(), path) {
                     eyre::bail!(
                         "'{}' and '{}' have the same file name. Rename one of them on disk, or send them in separate transfers", old.display(), path.display(),
@@ -955,6 +959,7 @@ async fn receive(
     relay_hints: Vec<transit::RelayHint>,
     target_dir: &std::path::Path,
     noconfirm: bool,
+    is_stdout: bool,
     transit_abilities: transit::Abilities,
     ctrl_c: impl Fn() -> futures::future::BoxFuture<'static, ()>,
 ) -> eyre::Result<()> {
@@ -965,7 +970,7 @@ async fn receive(
             .context("Could not get an offer")?;
         /* If None, the task got cancelled */
         if let Some(req) = req {
-            receive_inner_v1(req, target_dir, noconfirm, ctrl_c).await
+            receive_inner_v1(req, target_dir, noconfirm, is_stdout, ctrl_c).await
         } else {
             Ok(())
         }
@@ -978,7 +983,7 @@ async fn receive(
 
         match req {
             Some(transfer::ReceiveRequest::V1(req)) => {
-                receive_inner_v1(req, target_dir, noconfirm, ctrl_c).await
+                receive_inner_v1(req, target_dir, noconfirm, is_stdout, ctrl_c).await
             },
             #[cfg(feature = "experimental-transfer-v2")]
             Some(transfer::ReceiveRequest::V2(req)) => {
@@ -989,10 +994,13 @@ async fn receive(
     }
 }
 
+use std::io::stderr;
+
 async fn receive_inner_v1(
     req: transfer::ReceiveRequestV1,
     target_dir: &std::path::Path,
     noconfirm: bool,
+    is_stdout: bool,
     ctrl_c: impl Fn() -> futures::future::BoxFuture<'static, ()>,
 ) -> eyre::Result<()> {
     use async_std::fs::OpenOptions;
@@ -1023,25 +1031,23 @@ async fn receive_inner_v1(
     {
         return req.reject().await.context("Could not reject offer");
     }
-
     // TODO validate untrusted input here
     let file_path = std::path::Path::new(target_dir).join(req.file_name());
 
-    let pb = create_progress_bar(req.file_size());
+    let pb = if is_stdout {
+        ProgressBar::hidden()  // Use a hidden progress bar when outputting to stdout
+    } else {
+        create_progress_bar(req.file_size())
+    };
+    pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());  // Draw progress to stderr
 
-    /* Then, accept if the file exists */
-    if !file_path.exists() || noconfirm {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&file_path)
-            .await
-            .context("Failed to create destination file")?;
+    if is_stdout {
+        let mut output = async_std::io::stdout();
         return req
             .accept(
                 &transit_handler,
                 create_progress_handler(pb),
-                &mut file,
+                &mut output,
                 ctrl_c(),
             )
             .await
@@ -1173,7 +1179,7 @@ async fn receive_inner_v2(
 }
 
 fn transit_handler(info: TransitInfo) {
-    log::info!("{info}");
+    eprintln!("{info}");  // Use eprintln! instead of log::info!
 }
 
 #[cfg(test)]
