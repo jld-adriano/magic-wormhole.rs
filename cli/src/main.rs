@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 mod util;
-
+use transfer::offer::new_offer_content;
+use async_std::io::{Cursor, ReadExt};
 use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
@@ -650,11 +651,13 @@ async fn make_send_offer(
     file_name: Option<String>,
 ) -> eyre::Result<transfer::offer::OfferSend> {
     for file in &files {
-        eyre::ensure!(
-            async_std::path::Path::new(&file).exists().await,
-            "{} does not exist",
-            file.display()
-        );
+        if file.to_str() != Some("-") {
+            eyre::ensure!(
+                async_std::path::Path::new(&file).exists().await,
+                "{} does not exist",
+                file.display()
+            );
+        }
     }
     log::trace!("Making send offer in {files:?}, with name {file_name:?}");
 
@@ -662,19 +665,45 @@ async fn make_send_offer(
         (0, _) => unreachable!("Already checked by CLI parser"),
         (1, Some(file_name)) => {
             let file = files.remove(0);
-            Ok(transfer::offer::OfferSend::new_file_or_folder(file_name, file).await?)
+            if file.to_str() == Some("-") {
+                // Read from stdin
+                let mut content = Vec::new();
+                let mut stdin = async_std::io::stdin();
+                stdin.read_to_end(&mut content).await?;
+                let size = content.len() as u64;
+                let offer_content = new_offer_content(move || {
+                    let content = content.clone();
+                    async move { Ok(Cursor::new(content)) }
+                });
+                Ok(transfer::offer::OfferSend::new_file_custom(file_name, size, offer_content))
+            } else {
+                Ok(transfer::offer::OfferSend::new_file_or_folder(file_name, file).await?)
+            }
         },
         (1, None) => {
             let file = files.remove(0);
-            let file_name = file
-                .file_name()
-                .ok_or_else(|| {
-                    eyre::format_err!("You can't send a file without a name. Maybe try --rename")
-                })?
-                .to_str()
-                .ok_or_else(|| eyre::format_err!("File path must be a valid UTF-8 string"))?
-                .to_owned();
-            Ok(transfer::offer::OfferSend::new_file_or_folder(file_name, file).await?)
+            if file.to_str() == Some("-") {
+                // Read from stdin
+                let mut content = Vec::new();
+                let mut stdin = async_std::io::stdin();
+                stdin.read_to_end(&mut content).await?;
+                let size = content.len() as u64;
+                let offer_content = new_offer_content(move || {
+                    let content = content.clone();
+                    async move { Ok(Cursor::new(content)) }
+                });
+                Ok(transfer::offer::OfferSend::new_file_custom("stdin".to_string(), size, offer_content))
+            } else {
+                let file_name = file
+                    .file_name()
+                    .ok_or_else(|| {
+                        eyre::format_err!("You can't send a file without a name. Maybe try --rename")
+                    })?
+                    .to_str()
+                    .ok_or_else(|| eyre::format_err!("File path must be a valid UTF-8 string"))?
+                    .to_owned();
+                Ok(transfer::offer::OfferSend::new_file_or_folder(file_name, file).await?)
+            }
         },
         (_, Some(_)) => Err(eyre::format_err!(
             "Can't customize file name when sending multiple files"
